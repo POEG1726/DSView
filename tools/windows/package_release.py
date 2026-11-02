@@ -43,6 +43,8 @@ def main():
     parser.add_argument('--toolchain-root', required=True, type=Path)
     parser.add_argument('--output-root', required=True, type=Path)
     parser.add_argument('--version', required=True)
+    parser.add_argument('--source-cache', type=Path,
+                        help='Optional local cache of previously downloaded MSYS2 source archives')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     prefix = args.toolchain_root.resolve()
@@ -179,8 +181,12 @@ def main():
         target = source_dir / filename
         print(f'Downloading dependency source: {filename}', flush=True)
         request = urllib.request.Request(url, headers={'User-Agent': 'DSView-release-packager'})
-        with urllib.request.urlopen(request, timeout=120) as response, target.open('xb') as stream:
-            shutil.copyfileobj(response, stream, length=1024 * 1024)
+        cached = args.source_cache / filename if args.source_cache else None
+        if cached and cached.is_file():
+            shutil.copy2(cached, target)
+        else:
+            with urllib.request.urlopen(request, timeout=120) as response, target.open('xb') as stream:
+                shutil.copyfileobj(response, stream, length=1024 * 1024)
         # Validate the archive container without extracting or executing its contents.
         listing = run(['tar', '-tf', target])
         if 'PKGBUILD' not in listing:
@@ -207,6 +213,8 @@ Requirements: 64-bit Windows 10/11 with the supported device driver installed
 for physical capture. Windows 11 was used for local packaging checks; Windows
 10, a separate clean machine and final physical capture remain unvalidated.
 No driver installer is bundled. Obtain drivers from the instrument vendor.
+The optional IR IRMP native backend (irmp.dll) is not bundled; importing its
+decoder class does not establish that the optional backend is installed.
 
 Runtime self-check (no device access):
   DSView.exe --runtime-check runtime-check.json
@@ -227,7 +235,7 @@ Release page: https://github.com/POEG1726/DSView/releases/tag/v{args.version}
     archive = output / f'{name}.zip'
     with zipfile.ZipFile(archive, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zipped:
         for file in sorted(bundle.rglob('*')):
-            if file.is_file():
+            if file.is_file() and '__pycache__' not in file.parts and file.suffix != '.pyc':
                 zipped.write(file, file.relative_to(output))
     dep_archive = output / f'DSView-{args.version}-dependency-sources.zip'
     with zipfile.ZipFile(dep_archive, 'x', compression=zipfile.ZIP_STORED) as zipped:

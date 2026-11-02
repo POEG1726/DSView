@@ -6,6 +6,9 @@
 #include <cstdio>
 
 static void load(pv::data::LogicSnapshot *snapshot, unsigned char value) {
+    // Match the application's capture setup before first_payload: the constructor
+    // alone does not initialize the interleaved writer's partial-word state.
+    snapshot->clear();
     sr_channel channel = {}; channel.type=SR_CHANNEL_LOGIC; channel.enabled=TRUE; channel.index=0;
     GSList *channels=g_slist_append(NULL,&channel);
     uint8_t samples[8]; for (unsigned i=0;i<8;i++) samples[i]=value;

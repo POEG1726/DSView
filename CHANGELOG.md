@@ -14,5 +14,7 @@ Changes developed during 2026-10-31 through 2026-11-02, relative to upstream `2e
 - Identify the derivative in application and Windows file versions.
 - Add `--runtime-check REPORT_JSON` to check Qt SVG icons, bundled resources, Python initialization and decoder loading without opening a device session.
 - Add a portable Windows packaging script with dependency manifests, license notices, mirrored copyleft dependency sources and SHA-256 checksums.
+- Register portable runtime DLLs for Python extension imports, and require all bundled decoders to load in the runtime check.
+- Initialize the snapshot lifetime test through the same clear/setup path used by the application before feeding its first packet.
 
 These changes are not an upstream DSView release. Historical test results and remaining validation limits are linked from the README.

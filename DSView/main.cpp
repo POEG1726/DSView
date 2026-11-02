@@ -32,6 +32,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QFileInfo>
 #include <libsigrokdecode.h>
 #include "dsapplication.h"
 #include "mystyle.h" 
@@ -75,6 +76,18 @@ int main(int argc, char *argv[])
 
 	//----------------------rebuild command param
 #ifdef _WIN32
+        // Python extension modules use LoadLibraryEx search directories rather
+        // than PATH. Keep their dependencies available inside the portable runtime.
+        wchar_t executablePath[32768];
+        const DWORD executableLength = GetModuleFileNameW(NULL, executablePath, 32768);
+        if (executableLength && executableLength < 32768) {
+            const QString runtimeBin = QFileInfo(QString::fromWCharArray(executablePath)).dir().filePath("runtime/bin");
+            if (QDir(runtimeBin).exists() &&
+                !AddDllDirectory(reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(runtimeBin).utf16()))) {
+                std::fprintf(stderr, "Unable to register the portable runtime DLL directory.\n");
+                return 1;
+            }
+        }
         // Under Windows, we need to manually retrieve the command-line arguments and convert them from UTF-16 to UTF-8.
         // This prevents data loss if there are any characters that wouldn't fit in the local ANSI code page.
         int argcUTF16 = 0;		
@@ -234,10 +247,16 @@ bool bHighScale = true;
 		const bool python = srd_init(decoderPath.constData()) == SRD_OK;
 		const bool loaded = python && srd_decoder_load_all() == SRD_OK;
 		const int count = loaded ? g_slist_length(const_cast<GSList *>(srd_decoder_list())) : 0;
+		int expected = 0;
+		const QDir decoderDir(QString::fromUtf8(decoderPath));
+		for (const QString &entry : decoderDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot))
+			if (QFile::exists(decoderDir.filePath(entry + "/pd.py"))) ++expected;
 		report["python_initialized"] = python;
 		report["decoder_count"] = count;
+		report["expected_decoder_count"] = expected;
+		report["decoder_load_complete"] = loaded && expected > 0 && count == expected;
 		if (python) srd_exit();
-		const bool ok = icons && resources && loaded && count > 0;
+		const bool ok = icons && resources && loaded && expected > 0 && count == expected;
 		report["passed"] = ok;
 		QSaveFile file(runtimeReport);
 		const QByteArray json = QJsonDocument(report).toJson(QJsonDocument::Indented);

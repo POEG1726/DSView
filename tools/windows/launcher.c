@@ -23,6 +23,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     swprintf(newpath,size+wcslen(bin)+3,L"%ls;%ls",bin,oldpath);
     SetEnvironmentVariableW(L"PATH",newpath); SetEnvironmentVariableW(L"PYTHONHOME",runtime);
     SetEnvironmentVariableW(L"PYTHONPATH",NULL); SetEnvironmentVariableW(L"QT_PLUGIN_PATH",plugins);
+    SetEnvironmentVariableW(L"PYTHONDONTWRITEBYTECODE",L"1");
     SetEnvironmentVariableW(L"DSVIEW_TEST_ISOLATION",NULL); SetEnvironmentVariableW(L"DSVIEW_BENCH_LEGACY",NULL); SetEnvironmentVariableW(L"DSVIEW_BENCH_CHUNK_DELAY_MS",NULL);
     wchar_t *cmd=_wcsdup(GetCommandLineW()); STARTUPINFOW si={0}; PROCESS_INFORMATION pi={0}; si.cb=sizeof(si);
     if(!CreateProcessW(core,cmd,NULL,NULL,FALSE,0,NULL,NULL,&si,&pi)) { MessageBoxW(NULL,L"Unable to start DSView-core.exe. Check that the runtime directory is installed.",L"DSView",MB_OK|MB_ICONERROR); return 1; }
