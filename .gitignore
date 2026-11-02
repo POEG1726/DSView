@@ -59,3 +59,9 @@ qtpro5
 win32x
 qrc_*
 install_manifest.txt
+
+# Local investigation notes and generated validation/release data.
+/.planning/
+/test-results/
+/captures/
+/release/
