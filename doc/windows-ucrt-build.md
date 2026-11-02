@@ -52,3 +52,5 @@ Rename the launcher to `DSView.exe` only within the isolated runtime directory. 
 Without the launcher, set PATH to include the matching UCRT64 `bin`, PYTHONHOME to the toolchain prefix, and QT_PLUGIN_PATH to its `share/qt5/plugins` for that process. Put the DSView resources and decoders beside the executable as above. `DSVIEW_TEST_ISOLATION=1` makes the core use the `DSView-test` settings namespace. The optional system-style launcher clears that variable and uses normal DSView settings, so use the core directly for isolated development.
 
 The platform plugin is required for GUI startup. The SVG plugins are also required: missing `qsvgicon.dll` or `qsvg.dll` can leave title-bar and toolbar icons blank. `--version` exits before the GUI initializes and does not test these runtime components.
+
+`DSView.exe --runtime-check REPORT_JSON` checks Qt SVG icons, firmware-resource presence, Python initialization and decoder loading, writes a JSON report and exits before creating any device session or loading user profiles. `QT_QPA_PLATFORM=offscreen` can be used with the bundled offscreen platform plugin for automated checks.

@@ -33,7 +33,7 @@ Before committing, review the complete patch and the untracked files. Stage inte
 
 ## Binary releases
 
-Start with a source preview until a clean Windows runtime package has been assembled and tested. The local installed directory is not a release artifact. The standalone launcher source is [tools/windows/launcher.c](../tools/windows/launcher.c); its runtime layout is described in the build guide.
+Portable Windows prereleases are assembled from committed source and the matching MSYS2 UCRT64 packages. The local installed directory is not a release artifact. The standalone launcher source is [tools/windows/launcher.c](../tools/windows/launcher.c); its runtime layout is described in the build guide.
 
 For each binary release:
 
@@ -43,4 +43,18 @@ For each binary release:
 4. Test startup on a Windows machine without the development toolchain. A launcher `--version` check alone does not validate plugins, Python decoders or the main interface.
 5. Record actual device validation separately from offline checks. Publish SHA-256 hashes and release notes with known limitations.
 
-Runtime bundling, third-party notice assembly, derivative binary versioning and a clean-machine installation test remain release work; this preparation does not claim they have been completed.
+## Portable package command
+
+After building the committed source in UCRT64, use Python 3.11 or newer from the repository root (replace the toolchain prefix):
+
+```powershell
+python tools/windows/package_release.py --toolchain-root C:\msys64\ucrt64 --output-root release/v1.3.2-mod.1 --version 1.3.2-mod.1
+```
+
+The script requires a clean Git working tree and a new output directory. It assembles resources and the Python standard library from source/package files, computes the PE import closure against the selected prefix, includes Qt platform/SVG plugins and license notices, and downloads exact copyleft dependency source packages from MSYS2. It does not copy local profiles, vendor driver installers or an existing DSView installation. The package includes a merger at `runtime/bin/merge_loop_csv.exe`.
+
+Outputs are the Windows portable ZIP, corresponding application-source ZIP, mirrored dependency-source ZIP, `DEPENDENCIES.json` and `SHA256SUMS.txt`. Dependency manifests contain package versions, applicable license metadata, source locations and mirrored-source hashes. Zstandard uses its BSD license option; GCC runtime libraries retain their runtime exception.
+
+Before uploading, extract the Windows ZIP into a new directory, restrict PATH to Windows system directories and run `DSView.exe --runtime-check REPORT_JSON`. Confirm `passed: true` and that the report identifies the intended derivative version. This check runs before constructing an application/device session; it tests GUI runtime initialization, SVG icons, firmware-resource presence, embedded Python and decoder loading. It does not validate actual acquisition or replace a separate-machine test.
+
+`v1.3.2-mod.1` remains a prerelease because a separate clean-machine and final physical-device validation have not been performed. Local restricted-environment checks and offline regressions are recorded in its release notes. Do not promote it to a stable hardware-validated release based on those checks alone.

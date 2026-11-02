@@ -17,13 +17,15 @@ This source tree starts from upstream commit `2e9e2c8e726df4ef5687d39b83d4f797cc
 
 The locally exercised build is Windows x64, MSYS2 UCRT64 and Qt 5. See [Windows build and runtime setup](doc/windows-ucrt-build.md). Building this source does not replace an installed application.
 
+Windows portable prereleases and corresponding source are available on the [Releases page](https://github.com/POEG1726/DSView/releases). Extract the full Windows archive and run `DSView.exe`; no development toolchain is required. Device drivers are obtained separately from the instrument vendor.
+
 For continuous recording, select logic **Stream** mode, then **Loop**, and enable **Loop: record CSV to disk...** in the Mode menu. See [recording format, configuration and recovery limits](doc/loop-csv-recording.md).
 
 ## Validation status
 
 The export and recorder changes have offline regression coverage. Historical performance measurements and their conditions are recorded in [export verification](doc/export-verification-2026-10-31.md), [recorder throughput](doc/loop-csv-throughput-2026-10-31.md) and the [manual-stop fix](doc/loop-csv-requested-stop-2026-11-01.md).
 
-Synthetic 50 MHz recorder tests do not establish end-to-end USB capture performance. A separate historical 10 MHz physical-device test covered export/capture overlap; it did not validate the final Loop recorder or establish 50 MHz hardware reliability. Linux, macOS, Qt 6 and DScope behavior have not been revalidated for these changes. The application still reports the upstream `1.3.2` version; use the source commit to identify this derivative until release versioning is added.
+Synthetic 50 MHz recorder tests do not establish end-to-end USB capture performance. A separate historical 10 MHz physical-device test covered export/capture overlap; it did not validate the final Loop recorder or establish 50 MHz hardware reliability. Linux, macOS, Qt 6 and DScope behavior have not been revalidated for these changes. This derivative reports `1.3.2-mod.1`; release notes identify the exact source commit.
 
 See [test instructions](tests/README.md), [change history](CHANGELOG.md), [contribution guidance](CONTRIBUTING.md) and the [publication workflow](doc/releasing.md).
 

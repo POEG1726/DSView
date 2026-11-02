@@ -27,11 +27,17 @@
 #include <QStyle> 
 #include <QGuiApplication>
 #include <QScreen>
+#include <QIcon>
+#include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
+#include <libsigrokdecode.h>
 #include "dsapplication.h"
 #include "mystyle.h" 
 #include "pv/mainframe.h"
 #include "pv/config/appconfig.h"
-#include "config.h"
+#include <dsview_config.h>
 #include "pv/appcontrol.h"
 #include "pv/log.h" 
 #include "pv/ui/langresource.h"
@@ -54,6 +60,7 @@ void usage()
 		"  -v, -V, --version               Show release version\n"
 		"  -s, --storelog                  Save log to locale file\n"
 		"  -h, -?, --help                  Show help option\n"
+		"      --runtime-check REPORT      Check Qt, Python, decoders and resources without device access\n"
 		"\n", DS_BIN_NAME, DS_DESCRIPTION);
 }
 
@@ -64,6 +71,7 @@ int main(int argc, char *argv[])
 	const char *open_file = NULL;
 	int logLevel = -1;
 	bool bStoreLog = false;
+	QString runtimeReport;
 
 	//----------------------rebuild command param
 #ifdef _WIN32
@@ -103,6 +111,7 @@ int main(int argc, char *argv[])
 			{"version", no_argument, 0, 'v'},
 			{"storelog", no_argument, 0, 's'},
 			{"help", no_argument, 0, 'h'},
+			{"runtime-check", required_argument, 0, 1000},
 			{0, 0, 0, 0}
 		};
 
@@ -113,6 +122,9 @@ int main(int argc, char *argv[])
 
 		switch (c)
 		{
+		case 1000:
+			runtimeReport = QString::fromUtf8(optarg);
+			break;
 		case 'l': // log level
 			logLevel = atoi(optarg);
 			break;
@@ -196,7 +208,45 @@ bool bHighScale = true;
 		dsv_log_enalbe_logfile(true);
 	} 
 
-	AppControl *control = AppControl::Instance();	
+	// Exercise the shipped GUI/Python runtime before constructing any device session.
+	if (!runtimeReport.isEmpty()) {
+		QJsonObject report;
+		report["version"] = DS_VERSION_STRING;
+		report["qt_version"] = qVersion();
+		report["device_access"] = false;
+		bool icons = true;
+		for (const char *theme : {"dark", "light"}) {
+			for (const char *name : {"minimize", "maximize", "restore", "close"}) {
+				const QImage image = QIcon(QString(":/icons/%1/%2.svg").arg(theme, name)).pixmap(32, 32).toImage();
+				bool visible = false;
+				for (int y = 0; y < image.height() && !visible; ++y)
+					for (int x = 0; x < image.width(); ++x)
+						if (qAlpha(image.pixel(x, y))) { visible = true; break; }
+				icons = icons && !image.isNull() && visible;
+			}
+		}
+		report["svg_icons"] = icons;
+		const QString dataDir = GetAppDataDir();
+		const bool resources = QFile::exists(dataDir + "/res/DSLogic.fw") &&
+			QFile::exists(dataDir + "/res/DSLogicU2Pro16.bin");
+		report["resources"] = resources;
+		const QByteArray decoderPath = GetDecodeScriptDir().toUtf8();
+		const bool python = srd_init(decoderPath.constData()) == SRD_OK;
+		const bool loaded = python && srd_decoder_load_all() == SRD_OK;
+		const int count = loaded ? g_slist_length(const_cast<GSList *>(srd_decoder_list())) : 0;
+		report["python_initialized"] = python;
+		report["decoder_count"] = count;
+		if (python) srd_exit();
+		const bool ok = icons && resources && loaded && count > 0;
+		report["passed"] = ok;
+		QSaveFile file(runtimeReport);
+		const QByteArray json = QJsonDocument(report).toJson(QJsonDocument::Indented);
+		const bool saved = file.open(QIODevice::WriteOnly) && file.write(json) == json.size() && file.commit();
+		dsv_log_uninit();
+		return ok && saved ? 0 : 1;
+	}
+
+	AppControl *control = AppControl::Instance();
 	AppConfig &app = AppConfig::Instance(); 
 	app.LoadAll(); //load app config
 	LangResource::Instance()->Load(app.frameOptions.language);

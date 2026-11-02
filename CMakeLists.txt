@@ -27,17 +27,17 @@ project(DSView)
 #= Config Header
 #-------------------------------------------------------------------------------
 
-set(DS_TITLE DSView)
+set(DS_TITLE "DSView Modified")
 set(DS_DESCRIPTION "A GUI for instruments of DreamSourceLab")
 
 set(DS_VERSION_MAJOR 1)
 set(DS_VERSION_MINOR 3)
 set(DS_VERSION_MICRO 2)
-set(DS_VERSION_STRING  ${DS_VERSION_MAJOR}.${DS_VERSION_MINOR}.${DS_VERSION_MICRO})
+set(DS_VERSION_STRING  "${DS_VERSION_MAJOR}.${DS_VERSION_MINOR}.${DS_VERSION_MICRO}-mod.1")
 
 configure_file (
 	${PROJECT_SOURCE_DIR}/DSView/config.h.in
-	${PROJECT_BINARY_DIR}/DSView/config.h
+	${PROJECT_BINARY_DIR}/dsview_config.h
 )
 
 #===============================================================================
