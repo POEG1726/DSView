@@ -27,6 +27,9 @@
 #include "sigsession.h"
 
 #include "data/logicsnapshot.h"
+#include "data/logiccsvedges.h"
+#include <chrono>
+#include <algorithm>
 #include "data/dsosnapshot.h"
 #include "data/analogsnapshot.h"
 #include "data/decoderstack.h"
@@ -55,6 +58,7 @@
 #endif
  
 #include <libsigrokdecode.h>
+#include <libsigrok-internal.h>
 #include "config/appconfig.h"
 #include "dsvdef.h"
 #include "utility/encoding.h"
@@ -65,11 +69,30 @@
 
 #define DEOCDER_CONFIG_VERSION  2
  
-namespace pv { 
+namespace pv {
+
+// Owned entirely by the export task; device settings may change during capture.
+struct FrozenExport {
+    sr_dev_inst device;
+    std::vector<int> signal_indexes;
+    uint64_t samplerate;
+    QString session_time;
+    int original;
+    FrozenExport() : device{}, samplerate(0), original(0) {}
+    ~FrozenExport() {
+        for (GSList *l = device.channels; l; l = l->next) {
+            sr_channel *ch = static_cast<sr_channel *>(l->data);
+            g_free(ch->name);
+            g_free(ch);
+        }
+        g_slist_free(device.channels);
+    }
+};
 
 StoreSession::StoreSession(SigSession *session) :
 	_session(session),
     _outModule(NULL),
+    _frozen(NULL),
 	_units_stored(0),
     _unit_count(0),
     _has_error(false),
@@ -79,11 +102,16 @@ StoreSession::StoreSession(SigSession *session) :
     _start_index = 0;
     _end_index = 0;
     _is_busy = false;
+    _export_processing = false;
 }
 
 StoreSession::~StoreSession()
 {
-	wait();
+    wait();
+    if (_frozen) {
+        _session->release_export_data();
+        delete _frozen;
+    }
 }
 
 SigSession* StoreSession::session()
@@ -206,6 +234,7 @@ bool StoreSession::save_start()
         else
         {
             if (_thread.joinable()) _thread.join();
+            _is_busy = true;
             _thread = std::thread(&StoreSession::save_proc, this, snapshot);
             return !_has_error;
         }
@@ -804,6 +833,10 @@ bool StoreSession::meta_gen(data::Snapshot *snapshot, std::string &str)
 //export as csv file
 bool StoreSession::export_start()
 {
+    if (_session->is_working() || _session->get_device()->is_collecting()) {
+        _error = "Wait for the current capture to stop before exporting.";
+        return false;
+    }
     std::set<int> type_set;
     for(auto s : _session->get_signals()) {
         int _tp = s->get_type();
@@ -852,8 +885,45 @@ bool StoreSession::export_start()
     else
     {
         if (_thread.joinable()) _thread.join();
-        _thread = std::thread(&StoreSession::export_proc, this, snapshot);
-        return !_has_error;
+        // Logic text exports need only a frozen channel list and sample rate.
+        if (dynamic_cast<data::LogicSnapshot *>(snapshot) &&
+            strcmp(_outModule->id, "srzip") != 0) {
+            _frozen = new FrozenExport();
+            _frozen->device = *_session->get_device()->inst();
+            _frozen->device.channels = NULL;
+            for (GSList *l = _session->get_device()->inst()->channels; l; l = l->next) {
+                sr_channel *source = static_cast<sr_channel *>(l->data);
+                sr_channel *copy = static_cast<sr_channel *>(g_malloc(sizeof(sr_channel)));
+                *copy = *source;
+                copy->name = g_strdup(source->name);
+                _frozen->device.channels = g_slist_append(_frozen->device.channels, copy);
+            }
+            for (auto s : _session->get_signals())
+                if (s->get_type() == SR_CHANNEL_LOGIC) _frozen->signal_indexes.push_back(s->get_index());
+            _frozen->samplerate = _session->cur_snap_samplerate();
+            _frozen->session_time = Formatting::DateTimeToString(_session->get_session_time(), TimeStrigFormatType::TIME_STR_FORMAT_ALL);
+            _frozen->original = AppConfig::Instance().appOptions.originalData ? 1 : 0;
+            if (!_session->pin_export_data()) {
+                delete _frozen;
+                _frozen = NULL;
+                _error = "Another export is already in progress.";
+                return false;
+            }
+        }
+        _is_busy = true;
+        try {
+            _thread = std::thread(&StoreSession::export_proc, this, snapshot);
+        } catch (const std::system_error &error) {
+            _is_busy = false;
+            if (_frozen) {
+                _session->release_export_data();
+                delete _frozen;
+                _frozen = NULL;
+            }
+            _error = QString::fromLocal8Bit(error.what());
+            return false;
+        }
+        return true;
     }
 
     _error.clear();
@@ -865,9 +935,17 @@ void StoreSession::export_proc(data::Snapshot *snapshot)
     _is_busy = true;
 
     dsv_info("export task start.");
+    _export_processing = true;
 
-    export_exec(snapshot);
+    try {
+        export_exec(snapshot);
+    } catch (const std::exception &error) {
+        _has_error = true;
+        _error = QString::fromLocal8Bit(error.what());
+        dsv_err("Export failed: %s", error.what());
+    }
 
+    _export_processing = false;
     dsv_info("export task end.");
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     
@@ -880,7 +958,7 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
 
         //set export all data flag
     AppConfig &app = AppConfig::Instance();
-    int origin_flag = app.appOptions.originalData ? 1 : 0;
+    int origin_flag = _frozen ? _frozen->original : (app.appOptions.originalData ? 1 : 0);
 
     data::LogicSnapshot *logic_snapshot = NULL;
     data::AnalogSnapshot *analog_snapshot = NULL;
@@ -907,7 +985,7 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
 
     struct sr_output output;
     output.module = (sr_output_module*) _outModule;
-    output.sdi = _session->get_device()->inst();
+    output.sdi = _frozen ? &_frozen->device : _session->get_device()->inst();
     output.param = NULL;
     output.start_sample_index = 0;
 
@@ -918,15 +996,26 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
     if(_outModule->init){
        if(_outModule->init(&output, params) != SR_OK){
         dsv_err("Failed to init export module.");
+        _has_error = true;
+        _error = "Failed to initialize the export format.";
+        g_hash_table_destroy(params);
+        if (filenameGVariant != NULL) g_variant_unref(filenameGVariant);
         return;
        }
     }
   
-    QString dateTimeString = Formatting::DateTimeToString(_session->get_session_time(), TimeStrigFormatType::TIME_STR_FORMAT_ALL);
+    QString dateTimeString = _frozen ? _frozen->session_time : Formatting::DateTimeToString(_session->get_session_time(), TimeStrigFormatType::TIME_STR_FORMAT_ALL);
     strcpy(output.time_string, dateTimeString.toStdString().c_str());
     
     QFile file(_file_name);
-    file.open(QIODevice::WriteOnly | QIODevice::Text);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        _has_error = true;
+        _error = file.errorString();
+        _outModule->cleanup(&output);
+        g_hash_table_destroy(params);
+        if (filenameGVariant != NULL) g_variant_unref(filenameGVariant);
+        return;
+    }
     QTextStream out(&file); 
     encoding::set_utf8(out);
     //out.setGenerateByteOrderMark(true);  // UTF-8 without BOM
@@ -937,12 +1026,12 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
     struct sr_datafeed_meta meta;
     struct sr_config *src;
 
-    src = _session->get_device()->new_config(SR_CONF_SAMPLERATE,
-                g_variant_new_uint64(_session->cur_snap_samplerate()));
+    src = ds_new_config(SR_CONF_SAMPLERATE,
+                g_variant_new_uint64(_frozen ? _frozen->samplerate : _session->cur_snap_samplerate()));
 
     meta.config = g_slist_append(NULL, src);
 
-    src = _session->get_device()->new_config(SR_CONF_LIMIT_SAMPLES,
+    src = ds_new_config(SR_CONF_LIMIT_SAMPLES,
                 g_variant_new_uint64(snapshot->get_sample_count()));
 
     meta.config = g_slist_append(meta.config, src);
@@ -950,26 +1039,26 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
     GVariant *gvar;
     int bits=0;
 
-    _session->get_device()->get_config_byte(SR_CONF_UNIT_BITS, bits);
+    if (!_frozen) _session->get_device()->get_config_byte(SR_CONF_UNIT_BITS, bits);
 
-    gvar = _session->get_device()->get_config(SR_CONF_REF_MIN);
+    gvar = _frozen ? NULL : _session->get_device()->get_config(SR_CONF_REF_MIN);
     if (gvar != NULL) {
-        src = _session->get_device()->new_config(SR_CONF_REF_MIN, gvar);
+        src = ds_new_config(SR_CONF_REF_MIN, gvar);
         g_variant_unref(gvar);
     } 
     else {
-        src = _session->get_device()->new_config(SR_CONF_REF_MIN, g_variant_new_uint32(1));
+        src = ds_new_config(SR_CONF_REF_MIN, g_variant_new_uint32(1));
     }
 
     meta.config = g_slist_append(meta.config, src);
 
-    gvar = _session->get_device()->get_config(SR_CONF_REF_MAX);
+    gvar = _frozen ? NULL : _session->get_device()->get_config(SR_CONF_REF_MAX);
     if (gvar != NULL) {
-        src = _session->get_device()->new_config(SR_CONF_REF_MAX, gvar);
+        src = ds_new_config(SR_CONF_REF_MAX, gvar);
         g_variant_unref(gvar);
     }
     else {
-        src = _session->get_device()->new_config(SR_CONF_REF_MAX, g_variant_new_uint32((1 << bits) - 1));
+        src = ds_new_config(SR_CONF_REF_MAX, g_variant_new_uint32((1 << bits) - 1));
     }
     meta.config = g_slist_append(meta.config, src);
 
@@ -985,10 +1074,13 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
     }
     for (GSList *l = meta.config; l; l = l->next) {
         src = (struct sr_config *)l->data;
-        _session->get_device()->free_config(src);
+        ds_free_config(src);
     }
     g_slist_free(meta.config);
 
+    bool sparse_csv_export = false;
+    uint64_t sparse_scan_us = 0, sparse_format_us = 0, sparse_output_bytes = 0;
+    auto sparse_start_time = std::chrono::steady_clock::now();
     if (channel_type == SR_CHANNEL_LOGIC) {
         _unit_count = logic_snapshot->get_ring_sample_count();
         int blk_num = logic_snapshot->get_block_num();       
@@ -1029,6 +1121,14 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
             _unit_count = end_index;
         }
 
+        const bool sparse_csv = !qEnvironmentVariableIsSet("DSVIEW_BENCH_LEGACY") && origin_flag == 0 && !strcmp(_outModule->id, "csv") &&
+                                (_frozen ? _frozen->signal_indexes.size() : _session->get_signals().size()) <= 64;
+        sparse_csv_export = sparse_csv;
+        data::CsvEdgeScanner edge_scanner;
+        uint64_t sparse_processed = 0;
+        const int test_delay_ms = qMax(0, qMin(100, qEnvironmentVariableIntValue("DSVIEW_BENCH_CHUNK_DELAY_MS")));
+        auto last_progress = std::chrono::steady_clock::now();
+        bool csv_header_sent = false;
         for (int blk = 0; !_canceled  &&  blk < blk_num; blk++) {           
             buf_vec.clear();
             buf_sample.clear();
@@ -1047,10 +1147,12 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
                 block_size -= start_offset / 8;
             }
  
-            for(auto s : _session->get_signals()) {
-                int ch_type = s->get_type();
-                if (ch_type == SR_CHANNEL_LOGIC) {
-                    int ch_index = s->get_index();
+            std::vector<int> live_indexes;
+            if (!_frozen) for (auto s : _session->get_signals())
+                if (s->get_type() == SR_CHANNEL_LOGIC) live_indexes.push_back(s->get_index());
+            const std::vector<int> &indexes_to_export = _frozen ? _frozen->signal_indexes : live_indexes;
+            for (int ch_index : indexes_to_export) {
+                {
 
                     if (!logic_snapshot->has_data(ch_index)){
                         continue;
@@ -1069,9 +1171,51 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
             }
 
             const uint16_t unitsize = ceil(buf_vec.size() / 8.0);
-            unsigned int usize = 8192;
+            unsigned int usize = sparse_csv ? 524288 : 8192;
             unsigned int size = usize;
-            const uint64_t buf_sample_num = block_size * 8;            
+            const uint64_t buf_sample_num = block_size * 8;
+            if (sparse_csv) {
+                std::vector<uint64_t> indexes;
+                std::vector<uint8_t> values;
+                for (uint64_t i = 0; !_canceled && i < buf_sample_num; i += usize) {
+                    const uint64_t count = std::min<uint64_t>(usize, buf_sample_num - i);
+                    indexes.clear();
+                    values.clear();
+                    auto scan_started = std::chrono::steady_clock::now();
+                    edge_scanner.scan(buf_vec, buf_sample, i, count,
+                        [&](uint64_t pos, uint64_t value) {
+                            indexes.push_back(_start_index + sparse_processed + pos - i);
+                            for (unsigned int byte = 0; byte < unitsize; ++byte)
+                                values.push_back((value >> (byte * 8)) & 0xff);
+                        });
+                    auto format_started = std::chrono::steady_clock::now();
+                    sparse_scan_us += std::chrono::duration_cast<std::chrono::microseconds>(format_started - scan_started).count();
+                    if (!indexes.empty() || !csv_header_sent) {
+                        struct sr_datafeed_logic sparse = {};
+                        sparse.data = values.data();
+                        sparse.length = values.size();
+                        sparse.unitsize = unitsize;
+                        sr_csv_receive_sparse(&output, &sparse, indexes.data(), &data_out);
+                        if (data_out) {
+                            sparse_output_bytes += data_out->len;
+                            out << QString::fromUtf8(data_out->str, (int)data_out->len);
+                            g_string_free(data_out, TRUE);
+                        }
+                        csv_header_sent = true;
+                    }
+                    sparse_format_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - format_started).count();
+                    sparse_processed += count;
+                    _units_stored += count;
+                    if (test_delay_ms) std::this_thread::sleep_for(std::chrono::milliseconds(test_delay_ms));
+                    auto now = std::chrono::steady_clock::now();
+                    if (now - last_progress >= std::chrono::milliseconds(200)) {
+                        progress_updated();
+                        last_progress = now;
+                    }
+                }
+                continue;
+            }
             struct sr_datafeed_logic lp;
 
             uint8_t *xbuf = (uint8_t *)malloc(size * unitsize);
@@ -1245,8 +1389,20 @@ void StoreSession::export_exec(data::Snapshot *snapshot)
         }
     }
 
-    // optional, as QFile destructor will already do it:
+    // Flush the text stream before closing its underlying file.
+    out.flush();
+    if (out.status() != QTextStream::Ok || file.error() != QFileDevice::NoError) {
+        _has_error = true;
+        _error = file.errorString();
+    }
     file.close();
+    if (sparse_csv_export) {
+        const auto total_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - sparse_start_time).count();
+        dsv_info("Compressed CSV export: scan=%" PRIu64 " us, format/stream=%" PRIu64
+                 " us, processing+flush=%" PRIu64 " us, generated=%" PRIu64 " bytes",
+                 sparse_scan_us, sparse_format_us, (uint64_t)total_us, sparse_output_bytes);
+    }
     _outModule->cleanup(&output);
     g_hash_table_destroy(params);
     if (filenameGVariant != NULL)

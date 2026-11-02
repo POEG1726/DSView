@@ -466,6 +466,10 @@ namespace pv
 
     bool MainWindow::able_to_close()
     {
+        if (_session->is_saving()) {
+            MsgBox::Show("Please wait for the export to finish or cancel it before closing.");
+            return false;
+        }
         if (_device_agent->is_hardware() && _session->have_hardware_data() == false){
             _sampling_bar->commit_settings();
         }
@@ -598,6 +602,7 @@ namespace pv
     void MainWindow::on_save()
     {
         using pv::dialogs::StoreProgress;
+        if (_session->is_saving()) { MsgBox::Show("An export or save is already in progress."); return; }
 
         if (_device_agent->have_instance() == false)
         {
@@ -620,6 +625,7 @@ namespace pv
     void MainWindow::on_export()
     {
         using pv::dialogs::StoreProgress;
+        if (_session->is_saving()) { MsgBox::Show("An export or save is already in progress."); return; }
 
         if (_session->is_working()){
             dsv_info("Export data: stop the current device."); 

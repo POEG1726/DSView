@@ -25,7 +25,8 @@
 
 #include <stdint.h>
 #include <string>
-#include <thread>  
+#include <thread>
+#include <atomic>
 #include <QObject>
 #include <libsigrok.h> 
 
@@ -36,6 +37,7 @@
 namespace pv {
 
 class SigSession;
+struct FrozenExport;
 
 namespace data {
 class Snapshot;
@@ -61,6 +63,9 @@ public:
 	const QString& error();
     bool save_start();
     bool export_start();
+    bool supports_background_export() const { return _frozen != NULL; }
+    bool is_export_processing() const { return _export_processing; }
+    void SetExportTarget(const QString &file, const QString &format) { _file_name = file; _suffix = format; }
 	void wait();
 	void cancel();
 
@@ -113,16 +118,18 @@ private:
     SigSession      *_session;
 	std::thread     _thread;
     const struct sr_output_module* _outModule;
+    FrozenExport *_frozen;
  
-	uint64_t        _units_stored;
-	uint64_t        _unit_count;
+	std::atomic<uint64_t> _units_stored;
+	std::atomic<uint64_t> _unit_count;
     bool            _has_error;
 	QString         _error;
-    volatile bool   _canceled;
+    std::atomic<bool> _canceled;
     ZipMaker        m_zipDoc;  
     uint64_t        _start_index;
     uint64_t        _end_index;
-    volatile bool   _is_busy;
+    std::atomic<bool> _is_busy;
+    std::atomic<bool> _export_processing;
 };
 
 } // pv

@@ -41,6 +41,8 @@ class QAction;
 struct ds_device_info;
 
 class DeviceAgent;
+class QLabel;
+class QTimer;
 
 namespace pv
 {  
@@ -164,6 +166,9 @@ namespace pv
             QAction             *_action_repeat;
             QAction             *_action_single;
             QAction             *_action_loop;
+            QAction             *_action_loop_csv;
+            QLabel              *_loop_csv_status;
+            QTimer              *_loop_csv_timer;
         
             DeviceAgent         *_device_agent;
             ds_device_handle    _last_device_handle;

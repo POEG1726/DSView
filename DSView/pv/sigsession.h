@@ -29,6 +29,7 @@
 #include <stdint.h> 
 #include <QString>
 #include <thread>
+#include <memory>
 #include <QDateTime>
 #include <list>
 
@@ -57,6 +58,7 @@ class Snapshot;
 class AnalogSnapshot;
 class DsoSnapshot;
 class LogicSnapshot;
+class LoopCsvRecorder;
 class DecoderModel;
 class MathStack;
 
@@ -265,6 +267,16 @@ public:
     }
 
     data::Snapshot* get_snapshot(int type);
+    void configure_loop_csv(const QString &directory, unsigned segmentMiB = 1024, unsigned queueMiB = 256, uint64_t segmentSamples = 3000000000ull) {
+        _loop_csv_directory = directory; _loop_csv_segment_mib = segmentMiB; _loop_csv_queue_mib = queueMiB; _loop_csv_segment_samples = segmentSamples;
+    }
+    bool loop_csv_enabled() const { return !_loop_csv_directory.isEmpty(); }
+    bool loop_csv_running() const;
+    QString loop_csv_status() const;
+    QString loop_csv_output_directory() const;
+    SessionData *pin_export_data();
+    void release_export_data();
+    void clear_session_data(SessionData *&data);
 
     inline SESSION_ERROR_STATUS get_error(){
         return _error;
@@ -621,6 +633,14 @@ private:
     DeviceAgent   _device_agent;
     std::vector<IMessageListener*> _msg_listeners;
     DeviceEventObject   _device_event;
+    std::unique_ptr<data::LoopCsvRecorder> _loop_csv;
+    QString            _loop_csv_directory;
+    unsigned           _loop_csv_segment_mib = 1024;
+    uint64_t           _loop_csv_segment_samples = 3000000000ull;
+    unsigned           _loop_csv_queue_mib = 256;
+    uint64_t           _loop_csv_generation = 0;
+    SessionData       *_export_data;
+    bool               _export_data_detached;
     SessionData       *_view_data;
     SessionData       *_capture_data;
     std::vector<SessionData*> _data_list;

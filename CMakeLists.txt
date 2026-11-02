@@ -163,6 +163,12 @@ include_directories(${LIBUSB_1_INCLUDE_DIRS})
 #= zlib
 #-------------------------------------------------------------------------------
 find_package(ZLIB QUIET)
+find_path(ZSTD_INCLUDE_DIR zstd.h)
+find_library(ZSTD_LIBRARY NAMES zstd)
+if(NOT ZSTD_INCLUDE_DIR OR NOT ZSTD_LIBRARY)
+    message(FATAL_ERROR "Please install Zstandard (libzstd)!")
+endif()
+include_directories(${ZSTD_INCLUDE_DIR})
 
 if(NOT ZLIB_FOUND)
 	message(FATAL_ERROR  "Please install zlib!")
@@ -185,11 +191,17 @@ if(Qt5Core_FOUND)
 	#find_package(Qt5WinExtras REQUIRED)
 	find_package(Qt5Widgets REQUIRED)
 	find_package(Qt5Gui REQUIRED)
+	# DSView uses SVG throughout the interface, including the title bar.
+	find_package(Qt5Svg REQUIRED)
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${Qt5Widgets_EXECUTABLE_COMPILE_FLAGS}")
 	#set(QT_INCLUDE_DIRS ${Qt5Gui_INCLUDE_DIRS} ${Qt5Widgets_INCLUDE_DIRS} ${Qt5WinExtras_INCLUDE_DIRS})
 	#set(QT_LIBRARIES Qt5::Gui Qt5::Widgets Qt5::WinExtras)
 	set(QT_INCLUDE_DIRS ${Qt5Gui_INCLUDE_DIRS} ${Qt5Widgets_INCLUDE_DIRS})
 	set(QT_LIBRARIES Qt5::Gui Qt5::Widgets)
+	if(WIN32)
+		find_package(Qt5WinExtras REQUIRED)
+		list(APPEND QT_LIBRARIES Qt5::WinExtras)
+	endif()
 	add_definitions(${Qt5Gui_DEFINITIONS} ${Qt5Widgets_DEFINITIONS})
 else()
 	find_package(Qt6Core QUIET)
@@ -244,6 +256,7 @@ set(DSView_SOURCES
     DSView/pv/data/snapshot.cpp
     DSView/pv/data/signaldata.cpp
     DSView/pv/data/logicsnapshot.cpp
+    DSView/pv/data/loopcsvrecorder.cpp
     DSView/pv/data/analogsnapshot.cpp
     DSView/pv/dialogs/deviceoptions.cpp
     DSView/pv/prop/property.cpp
@@ -554,7 +567,8 @@ if(WIN32)
 	set(CMAKE_RC_COMPILE_OBJECT "${CMAKE_RC_COMPILER} -O coff -I${CMAKE_CURRENT_SOURCE_DIR} <SOURCE> <OBJECT>")
 	enable_language(RC)
 	# app icon
-        list(APPEND DSView_SOURCES applogo.rc)
+        list(APPEND DSView_SOURCES applogo.rc DSView/pv/winshadow.cpp)
+        list(APPEND DSView_HEADERS DSView/pv/winshadow.h)
 endif()
 
 if(Qt5Core_FOUND)
@@ -610,6 +624,7 @@ add_compile_options(-O3)
 
 
 set(DSVIEW_LINK_LIBS
+	${ZSTD_LIBRARY}
 	-lz
 	-lglib-2.0
 	${CMAKE_THREAD_LIBS_INIT}
@@ -629,6 +644,11 @@ endif()
 else()
 	link_directories(${PKGDEPS_LIBRARY_DIRS})
 	list(APPEND DSVIEW_LINK_LIBS ${PKGDEPS_LIBRARIES})
+endif()
+
+if(WIN32)
+    list(APPEND DSView_SOURCES DSView/pv/winnativewidget.cpp)
+    set_source_files_properties(DSView/pv/winnativewidget.cpp PROPERTIES COMPILE_DEFINITIONS "UNICODE;_UNICODE")
 endif()
 
 add_executable(${PROJECT_NAME}

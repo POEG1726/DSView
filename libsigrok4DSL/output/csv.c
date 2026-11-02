@@ -212,8 +212,8 @@ static GString *gen_header(const struct sr_output *o)
 	return header;
 }
 
-static int receive(const struct sr_output *o, const struct sr_datafeed_packet *packet,
-		GString **out)
+static int receive_internal(const struct sr_output *o, const struct sr_datafeed_packet *packet,
+        GString **out, const uint64_t *indexes)
 {
 	const struct sr_datafeed_meta *meta;
 	const struct sr_datafeed_logic *logic;
@@ -273,11 +273,17 @@ static int receive(const struct sr_output *o, const struct sr_datafeed_packet *p
 			*out = g_string_sized_new(512);
 		}
 
-		for (i = 0; i <= logic->length - logic->unitsize; i += logic->unitsize) {
-            ctx->index++;
+		for (i = 0; i < logic->length; i += logic->unitsize) {
+            uint64_t sample = 0;
+            memcpy(&sample, (const uint8_t *)logic->data + i,
+                   logic->unitsize < sizeof(sample) ? logic->unitsize : sizeof(sample));
+            if (indexes)
+                ctx->index = indexes[i / logic->unitsize] + 1;
+            else
+                ctx->index++;
 
             if (packet->bExportOriginalData == 0){
-                if (ctx->index > 1 && (*(uint64_t *)(logic->data + i) & ctx->mask) == ctx->pre_data)
+                if (ctx->index > 1 && (sample & ctx->mask) == ctx->pre_data)
                    continue;
             } 
             
@@ -309,7 +315,7 @@ static int receive(const struct sr_output *o, const struct sr_datafeed_packet *p
                 g_string_append_c(*out, c ? '1' : '0');
 			}
 			g_string_append_printf(*out, "\n");
-            ctx->pre_data = (*(uint64_t *)(logic->data + i) & ctx->mask);
+            ctx->pre_data = sample & ctx->mask;
 		}
 		break;
      case SR_DF_DSO:
@@ -393,6 +399,22 @@ static int receive(const struct sr_output *o, const struct sr_datafeed_packet *p
 	}
 
 	return SR_OK;
+}
+
+static int receive(const struct sr_output *o, const struct sr_datafeed_packet *packet,
+                   GString **out)
+{
+    return receive_internal(o, packet, out, NULL);
+}
+
+SR_API int sr_csv_receive_sparse(const struct sr_output *o,
+        const struct sr_datafeed_logic *logic, const uint64_t *indexes, GString **out)
+{
+    struct sr_datafeed_packet packet = {0};
+    packet.type = SR_DF_LOGIC;
+    packet.payload = logic;
+    packet.bExportOriginalData = 0;
+    return receive_internal(o, &packet, out, indexes);
 }
 
 static int cleanup(struct sr_output *o)

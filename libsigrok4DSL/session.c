@@ -207,7 +207,7 @@ SR_PRIV int sr_session_run(void)
 	sr_dbg("Running...");
 
 	/* Do we have real sources? */
-	if (session->num_sources == 1 && session->pollfds[0].fd == -1) {
+	if (session->num_sources == 1 && session->pollfds[0].fd == -1 && session->sources[0].timeout == 0) {
 		/* Dummy source, freewheel over it. */
         while (session->num_sources) {
             if (session->abort_session) {

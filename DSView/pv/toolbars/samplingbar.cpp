@@ -23,6 +23,10 @@
 #include <assert.h>
 #include <QAction>
 #include <QLabel>
+#include <QFileDialog>
+#include <QInputDialog>
+#include <QDir>
+#include <QTimer>
 #include <QAbstractItemView>
 #include <math.h>
 #include <libusb-1.0/libusb.h>
@@ -117,10 +121,55 @@ namespace pv
             _mode_menu->addAction(_action_single);
             _mode_menu->addAction(_action_repeat);
             _mode_menu->addAction(_action_loop);
+            _mode_menu->addSeparator();
+            _action_loop_csv = new QAction(tr("Loop: record CSV to disk..."), this);
+            _action_loop_csv->setCheckable(true);
+            _mode_menu->addAction(_action_loop_csv);
+            connect(_action_loop_csv, &QAction::triggered, this, [this](bool enabled) {
+                if (_session->is_working() || _session->loop_csv_running()) {
+                    _action_loop_csv->setChecked(_session->loop_csv_enabled());
+                    MsgBox::Show(tr("Stop the capture and wait for CSV writing to finish first."));
+                    return;
+                }
+                if (!enabled) { _session->configure_loop_csv(QString()); return; }
+                QString dir=QFileDialog::getExistingDirectory(this, tr("Choose Loop CSV recording directory"), QDir::homePath());
+                if (dir.isEmpty()) { _action_loop_csv->setChecked(false); return; }
+                bool ok=false;
+                int segmentMiB=QInputDialog::getInt(this, tr("Loop CSV file size"),
+                    tr("Maximum uncompressed CSV per file (MiB):"), 1024, 1, 16384, 1, &ok);
+                if (!ok) { _action_loop_csv->setChecked(false); return; }
+                int queueMiB=QInputDialog::getInt(this, tr("Loop CSV buffer"),
+                    tr("Maximum write queue (MiB):"), 256, 8, 4096, 8, &ok);
+                if (!ok) { _action_loop_csv->setChecked(false); return; }
+                const QString sampleText=QInputDialog::getText(this, tr("Loop CSV sample count"),
+                    tr("Maximum samples per file:"), QLineEdit::Normal, "3000000000", &ok);
+                if (!ok) { _action_loop_csv->setChecked(false); return; }
+                bool valid=false;
+                const qulonglong segmentSamples=sampleText.trimmed().toULongLong(&valid);
+                if (!valid || segmentSamples == 0) {
+                    QMessageBox::warning(this, tr("Loop CSV sample count"), tr("Enter a positive sample count."));
+                    _action_loop_csv->setChecked(false); return;
+                }
+                _session->configure_loop_csv(dir, unsigned(segmentMiB), unsigned(queueMiB), segmentSamples);
+                _action_loop_csv->setToolTip(dir);
+            });
             _mode_button.setMenu(_mode_menu);
 
             _mode_button.setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
             _mode_action = addWidget(&_mode_button);
+            _loop_csv_status = new QLabel(this);
+            _loop_csv_status->setVisible(false);
+            addWidget(_loop_csv_status);
+            _loop_csv_timer = new QTimer(this);
+            _loop_csv_timer->setInterval(500);
+            connect(_loop_csv_timer, &QTimer::timeout, this, [this]() {
+                const QString status = _session->loop_csv_status();
+                _loop_csv_status->setText(status);
+                _loop_csv_status->setStyleSheet(status.startsWith("WARNING:") ? "color: #e45454; font-weight: bold;" : "");
+                _loop_csv_status->setToolTip(_session->loop_csv_output_directory());
+                _loop_csv_status->setVisible(!status.isEmpty());
+            });
+            _loop_csv_timer->start();
 
             _run_stop_button.setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
             _run_stop_action = addWidget(&_run_stop_button);

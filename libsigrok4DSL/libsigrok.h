@@ -1232,6 +1232,9 @@ SR_API struct sr_input_format **sr_input_list(void);
 /*--- output/output.c -------------------------------------------------------*/
 
 SR_API const struct sr_output_module **sr_output_list(void);
+/* CSV-only sparse logic samples; indexes are absolute sample indexes. */
+SR_API int sr_csv_receive_sparse(const struct sr_output *o,
+        const struct sr_datafeed_logic *logic, const uint64_t *indexes, GString **out);
 
 /*--- strutil.c -------------------------------------------------------------*/
 

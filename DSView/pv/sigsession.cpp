@@ -28,6 +28,11 @@
 #include "data/analogsnapshot.h"
 #include "data/dsosnapshot.h"
 #include "data/logicsnapshot.h"
+#include "data/loopcsvrecorder.h"
+#include <QCoreApplication>
+#include <QMetaObject>
+#include <QTemporaryFile>
+#include <QDir>
 #include "data/decoderstack.h"
 #include "data/decode/decoder.h"
 #include "data/decodermodel.h"
@@ -96,6 +101,8 @@ namespace pv
         _clt_mode = COLLECT_SINGLE;
         _rt_refresh_time_id = 0;
         _rt_ck_refresh_time_id = 0;
+        _export_data = NULL;
+        _export_data_detached = false;
         _view_data = NULL;
         _capture_data = NULL;
         _is_stream_mode = false;
@@ -179,7 +186,7 @@ namespace pv
 
     bool SigSession::set_default_device()
     {
-        assert(!_is_saving);
+        if (_is_saving) return false;
         
         if (_is_working){
             dsv_info("SigSession::set_default_device()，The current device is working, now to stop it.");
@@ -217,7 +224,7 @@ namespace pv
 
     bool SigSession::set_device(ds_device_handle dev_handle)
     {
-        assert(!_is_saving);
+        if (_is_saving) return false;
         assert(!_is_working);
         assert(_callback);
 
@@ -246,8 +253,8 @@ namespace pv
 
         clear_all_decoder();
 
-        _view_data->clear();
-        _capture_data->clear();
+        clear_session_data(_view_data);
+        clear_session_data(_capture_data);
         _capture_data = _view_data;
  
         init_signals();
@@ -309,7 +316,7 @@ namespace pv
 
     bool SigSession::set_file(QString name)
     {
-        assert(!_is_saving);
+        if (_is_saving) return false;
         assert(!_is_working);
 
         std::string file_name = pv::path::ToUnicodePath(name);
@@ -475,7 +482,7 @@ namespace pv
         data_unlock();
 
         // Init data container
-        _capture_data->clear();
+        clear_session_data(_capture_data);
 
         int mode = _device_agent.get_work_mode();
         if (mode == DSO)
@@ -530,6 +537,11 @@ namespace pv
             return false;
         }
 
+        if (loop_csv_running()) {
+            MsgBox::Show("The previous Loop CSV recording is still finishing.");
+            return false;
+        }
+
         if (_signals.empty()){
             dsv_info("ERROR: channel list is empty, unable to capture data.");
             return false;
@@ -547,11 +559,22 @@ namespace pv
             return false;
         }
 
+        // Validate the destination before clearing the previous capture.
+        if (loop_csv_enabled() && is_loop_mode() && _device_agent.get_work_mode() == LOGIC &&
+            (_device_agent.is_demo() || _device_agent.is_stream_mode())) {
+            QTemporaryFile probe(QDir(_loop_csv_directory).filePath(".dsview-loop-XXXXXX"));
+            if (!probe.open() || probe.write("x", 1) != 1 || !probe.flush()) {
+                MsgBox::Show("Cannot write to the Loop CSV directory: " + probe.errorString());
+                return false;
+            }
+        }
+
+        ++_loop_csv_generation;
         clear_all_decode_task2();
         clear_decode_result(); 
         
-        _capture_data->clear();
-        _view_data->clear();       
+        clear_session_data(_capture_data);
+        clear_session_data(_view_data);
         _is_stream_mode = false;
         _capture_times = 0;
         _dso_packet_count = 0;
@@ -615,6 +638,40 @@ namespace pv
 
         _callback->trigger_message(DSV_MSG_START_COLLECT_WORK_PREV);
 
+        if (loop_csv_enabled() && is_loop_mode() && mode == LOGIC && _is_stream_mode) {
+            if (loop_csv_running()) {
+                MsgBox::Show("The previous Loop CSV recording is still finishing.");
+                return false;
+            }
+            QStringList channelNames;
+            for (GSList *l = _device_agent.get_channels(); l; l = l->next) {
+                sr_channel *ch = static_cast<sr_channel *>(l->data);
+                if (ch->enabled && ch->type == SR_CHANNEL_LOGIC)
+                    channelNames << QString::fromUtf8(ch->name ? ch->name : "");
+            }
+            _loop_csv.reset(new data::LoopCsvRecorder());
+            QString error;
+            const uint64_t generation = _loop_csv_generation;
+            auto onError = [this, generation](const QString &message) {
+                QMetaObject::invokeMethod(QCoreApplication::instance(), [this, generation, message]() {
+                    if (generation != _loop_csv_generation) return;
+                    const QString dir = _loop_csv ? _loop_csv->outputDirectory() : QString();
+                    const uint64_t processed = _loop_csv ? _loop_csv->samplesWritten() : 0;
+                    dsv_err("Loop CSV error: %s; processed samples=%llu", message.toUtf8().constData(), (unsigned long long)processed);
+                    if (_is_working) stop_capture();
+                    _callback->delay_prop_msg(message + QString("\nProcessed samples (not guaranteed durable): %1\nDirectory: %2").arg(processed).arg(dir));
+                }, Qt::QueuedConnection);
+            };
+            if (!_loop_csv->start(_loop_csv_directory, _device_agent.get_sample_rate(), channelNames, onError, &error,
+                                  uint64_t(_loop_csv_segment_mib) * 1024 * 1024,
+                                  data::LoopCsvRecorder::DefaultBlockBytes,
+                                  size_t(_loop_csv_queue_mib) * 1024 * 1024, _loop_csv_segment_samples)) {
+                MsgBox::Show("Cannot start Loop CSV recording: " + error);
+                return false;
+            }
+            dsv_info("Loop CSV directory: %s", _loop_csv->outputDirectory().toUtf8().constData());
+        }
+
         if (exec_capture())
         {   
             _work_time_id++;
@@ -629,6 +686,10 @@ namespace pv
             return true;
         }
 
+        if (_loop_csv && _loop_csv->running()) {
+            _loop_csv->fail("Capture could not be started; Loop CSV is incomplete.");
+            _loop_csv->finish();
+        }
         return false;
     }
 
@@ -713,7 +774,7 @@ namespace pv
 
             buf_index = (buf_index + 1) % 2;
             _capture_data = _data_list[buf_index];
-            _capture_data->clear();
+            clear_session_data(_capture_data);
 
             set_cur_snap_samplerate(_device_agent.get_sample_rate());
             set_cur_samplelimits(_device_agent.get_sample_limit());
@@ -756,6 +817,10 @@ namespace pv
             return false;
 
         dsv_info("Stop collect.");
+
+        // Record intent before the device can send its final, unaligned USB data.
+        if (_loop_csv && _loop_csv->running())
+            _loop_csv->markCaptureStopRequested();
 
         if (_bClose)
         {
@@ -889,8 +954,8 @@ namespace pv
         unsigned int dso_probe_count = 0;
         unsigned int analog_probe_count = 0;
 
-        _capture_data->clear();
-        _view_data->clear();
+        clear_session_data(_capture_data);
+        clear_session_data(_view_data);
         set_cur_snap_samplerate(_device_agent.get_sample_rate());
         set_cur_samplelimits(_device_agent.get_sample_limit());    
 
@@ -1106,6 +1171,8 @@ namespace pv
         ds_lock_guard lock(_data_mutex);
 
         data_lock();
+        if (_export_data && !_export_data_detached && _view_data == _export_data)
+            clear_session_data(_view_data);
         _view_data->get_logic()->init();
 
         clear_all_decode_task2();
@@ -1399,6 +1466,25 @@ namespace pv
         assert(packet); 
 
         ds_lock_guard lock(_data_mutex);
+
+        // Record before display locking can discard a packet. The recorder copies
+        // the buffer before the device driver can recycle it.
+        if (_loop_csv && _loop_csv->running()) {
+            if (packet->type == SR_DF_LOGIC && packet->status == SR_PKT_OK && packet->payload) {
+                const sr_datafeed_logic *logic = static_cast<const sr_datafeed_logic *>(packet->payload);
+                if (logic->format != LA_CROSS_DATA || (logic->length && !logic->data))
+                    _loop_csv->fail("Unexpected logic data format; Loop CSV is incomplete.");
+                else if (logic->length)
+                    _loop_csv->submit(logic->data, size_t(logic->length));
+            } else if (packet->type == SR_DF_OVERFLOW ||
+                       (packet->status != SR_PKT_OK && packet->type != SR_DF_END)) {
+                _loop_csv->fail("Capture data was lost or invalid; Loop CSV is incomplete.");
+            } else if (packet->type == SR_DF_END) {
+                if (packet->status != SR_PKT_OK)
+                    _loop_csv->fail("Capture ended with an error; Loop CSV is incomplete.");
+                _loop_csv->finish();
+            }
+        }
 
         if (_data_lock && packet->type != SR_DF_END)
             return;
@@ -1831,6 +1917,70 @@ namespace pv
         }
     }
 
+    bool SigSession::loop_csv_running() const
+    {
+        return _loop_csv && _loop_csv->running();
+    }
+
+    QString SigSession::loop_csv_status() const
+    {
+        if (!_loop_csv) return QString();
+        const double elapsed = _loop_csv->elapsedMicros() / 1000000.0;
+        const double bytes = double(_loop_csv->bytesWritten());
+        const double queueMiB = _loop_csv->queuedBytes() / (1024.0 * 1024.0);
+        const double queuePercent = queueMiB * 100.0 / qMax(1u, _loop_csv_queue_mib);
+        const QString warning = queuePercent >= 75.0 ? "WARNING: " : "";
+        const QString state = _loop_csv->failed() ? " (incomplete)" : (_loop_csv->running() ? "" : " (complete)");
+        return QString("%1Loop CSV: %2 MiB | avg %3 MiB/s | queue %4 MiB (%5%) | %6 s | file %7%8")
+            .arg(warning).arg(bytes / (1024.0 * 1024.0), 0, 'f', 1)
+            .arg(elapsed > 0 ? bytes / elapsed / (1024.0 * 1024.0) : 0.0, 0, 'f', 1)
+            .arg(queueMiB, 0, 'f', 1).arg(queuePercent, 0, 'f', 0)
+            .arg(_loop_csv->samplesWritten() / double(_loop_csv->sampleRate()), 0, 'f', 1)
+            .arg(_loop_csv->segmentCount()).arg(state);
+    }
+
+    QString SigSession::loop_csv_output_directory() const
+    {
+        return _loop_csv ? _loop_csv->outputDirectory() : QString();
+    }
+
+    SessionData *SigSession::pin_export_data()
+    {
+        if (_export_data) return NULL;
+        _export_data = _view_data;
+        _export_data_detached = false;
+        return _export_data;
+    }
+
+    void SigSession::clear_session_data(SessionData *&data)
+    {
+        if (_export_data && !_export_data_detached && data == _export_data) {
+            clear_all_decode_task2();
+            if (_callback) clear_decode_result();
+            SessionData *replacement = new SessionData();
+            for (auto &entry : _data_list)
+                if (entry == _export_data) { entry = replacement; break; }
+            if (_view_data == _export_data) {
+                _view_data = replacement;
+                attach_data_to_signal(replacement);
+            }
+            if (_capture_data == _export_data) _capture_data = replacement;
+            data = replacement;
+            _export_data_detached = true;
+        }
+        data->clear();
+    }
+
+    void SigSession::release_export_data()
+    {
+        if (_export_data_detached) {
+            _export_data->clear();
+            delete _export_data;
+        }
+        _export_data = NULL;
+        _export_data_detached = false;
+    }
+
     data::Snapshot *SigSession::get_snapshot(int type)
     {
         if (type == SR_CHANNEL_LOGIC)
@@ -1885,6 +2035,7 @@ namespace pv
 
         dsv_info("SigSession::Close(), stop capture");
         stop_capture();
+        if (_loop_csv) { _loop_csv->finish(); _loop_csv->wait(); }
 
         // TODO: This should not be necessary
         _session = NULL;
@@ -2128,6 +2279,8 @@ namespace pv
 
         case DS_EV_CURRENT_DEVICE_DETACH:
         {
+            if (_loop_csv && _loop_csv->running())
+                _loop_csv->fail("Device disconnected; Loop CSV is incomplete.");
             if (_is_working){
                 dsv_info("SigSession::on_device_lib_event,DS_EV_CURRENT_DEVICE_DETACH, stop capture");
                 stop_capture();
@@ -2278,7 +2431,7 @@ namespace pv
                         if (!swapBackBufferAlways && !_is_working && _capture_times > 1){
                             bAddDecoder = false;
                             bSwapBuffer = false;
-                            _capture_data->clear();
+                            clear_session_data(_capture_data);
                         }
                     }
 
@@ -2293,7 +2446,7 @@ namespace pv
                     if (bSwapBuffer)
                     {
                         if (_view_data != _capture_data)
-                            _view_data->clear();
+                            clear_session_data(_view_data);
                         
                         _view_data = _capture_data; 
                         attach_data_to_signal(_view_data); 
@@ -2362,8 +2515,8 @@ namespace pv
                 }
             }
 
-            _capture_data->clear();
-            _view_data->clear();
+            clear_session_data(_capture_data);
+            clear_session_data(_view_data);
             _capture_data = _view_data;              
             
             init_signals();
@@ -2485,7 +2638,7 @@ namespace pv
 
     void SigSession::clear_view_data()
     {
-        _view_data->clear();
+        clear_session_data(_view_data);
         data_updated();
     }
 

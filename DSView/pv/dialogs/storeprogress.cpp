@@ -112,7 +112,10 @@ StoreProgress::StoreProgress(SigSession *session, QWidget *parent) :
 
 StoreProgress::~StoreProgress()
 {
-    _store_session->wait();
+    if (_store_session) {
+        _store_session->wait();
+        delete _store_session;
+    }
 }
 
 void StoreProgress::closeEvent(QCloseEvent* event)
@@ -124,8 +127,12 @@ void StoreProgress::closeEvent(QCloseEvent* event)
         return;
     }
    
-    _store_session->session()->set_saving(false);
-    _store_session->session()->broadcast_msg(DSV_MSG_SAVE_COMPLETE);
+    _store_session->wait();
+    SigSession *session = _store_session->session();
+    delete _store_session;
+    _store_session = NULL;
+    session->set_saving(false);
+    session->broadcast_msg(DSV_MSG_SAVE_COMPLETE);
 
     delete this;
 }
@@ -149,6 +156,7 @@ void StoreProgress::on_timeout()
 {   
     //The task is end, to close the window.
     if (_store_session->is_busy() == false) {
+        show_error();
         close();      
     }
 }
@@ -239,7 +247,12 @@ void StoreProgress::accept()
     if (_isExport){
         if (_store_session->export_start()){
             _is_done = true;
-            _store_session->session()->set_saving(true);             
+            _store_session->session()->set_saving(true);
+            if (_store_session->supports_background_export()) {
+                hide();
+                setModal(false);
+                show();
+            }
             setTitle(L_S(STR_PAGE_DLG, S_ID(IDS_DLG_EXPORTING), "Exporting...")); 
             m_timer.start();
         }
@@ -378,10 +391,7 @@ void StoreProgress::on_progress_updated()
         _progress->setValue(100);
     }
 
-    const QString err = _store_session->error();
-	if (!err.isEmpty()) {
-		show_error();
-	}
+
 }
 
 void StoreProgress::on_change_file()
